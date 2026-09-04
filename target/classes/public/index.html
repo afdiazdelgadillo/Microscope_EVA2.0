@@ -1,0 +1,346 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="Microscope Workstation Controller">
+    <title>Microscope Workstation V70 - Modular Engine</title>
+    <link rel="stylesheet" href="css/style.css">
+    <link rel="icon" href="data:,">
+</head>
+<body>
+
+    <svg style="width:0; height:0; position:absolute; z-index:-1;">
+        <filter id="filterEdge">
+            <feConvolveMatrix order="3 3" preserveAlpha="true" kernelMatrix="-1 -1 -1  -1 8 -1  -1 -1 -1"/>
+        </filter>
+        <filter id="filterDenoise">
+            <feConvolveMatrix order="3 3" preserveAlpha="true" kernelMatrix="-1 -1 -1  -1 9 -1  -1 -1 -1"/>
+        </filter>
+        <filter id="filterBoth">
+            <feConvolveMatrix in="SourceGraphic" order="3 3" preserveAlpha="true" kernelMatrix="-1 -1 -1  -1 9 -1  -1 -1 -1" result="denoised"/>
+            <feConvolveMatrix in="denoised" order="3 3" preserveAlpha="true" kernelMatrix="-1 -1 -1  -1 8 -1  -1 -1 -1"/>
+        </filter>
+    </svg>
+
+    <div id="sessionOverlay">
+        <div class="setup-card">
+            <h3>SESSION SETUP</h3>
+            <label>User Name</label>
+            <input type="text" id="userName" placeholder="Operator Name">
+            <label>Experiment Name</label>
+            <input type="text" id="expName" placeholder="Experiment_01">
+            <p>Note: Ensure Backend API is running.</p>
+            <button id="btnInitSession">START SESSION</button>
+        </div>
+    </div>
+
+    <div class="workspace" id="mainPanel">
+        
+        <div class="control-panel">
+            <h2 style="margin-top: 0; font-size: 1.4em;">MICROSCOPE V70</h2>
+            
+            <div class="section">
+                <div class="section-header">
+                    <label>Illumination / Hall Sensor</label>
+                    <button id="lightToggle" class="conn-btn conn-off">OFF</button>
+                </div>
+                <div style="font-family:monospace; font-size:1.12em; color:#aa8855; margin-bottom:5px; padding:5px; background:#050505; border:1px solid #4a3c2c;">
+                    Connection: <span id="serialStatus" style="color:orange;">Awaiting Browser Direct USB...</span>
+                </div>
+                <input type="range" id="lightSlider" min="0" max="10" value="0">
+                <div id="lightValue" class="val-display">Protocol: 000 000 000</div>
+            </div>
+
+            <div class="section">
+                <div class="section-header">
+                    <label>Stage Position</label>
+                    <div>
+                        <button id="btnScanPorts" class="conn-btn" style="background:#4a3c2c; color:#f0f0f0; margin-right: 5px;" title="Scan for Backend COM Ports">↻ SCAN</button>
+                        <button id="stageToggle" class="conn-btn conn-off">OFF</button>
+                    </div>
+                </div>
+                <select id="stagePort"></select>
+                
+                <div class="coords" id="posDisplayContainer">
+                    <div>X: <span id="posX">0.000</span> | Y: <span id="posY">0.000</span> | Z: <span id="posZ">0.000</span></div>
+                    <div style="display:flex; justify-content:center; align-items:center; margin-top:8px;">
+                        <input type="number" id="hallLimLeft" class="limit-input" value="0" title="Left Limit (Gv)">
+                        <span id="gvDisplay" class="sensor">Gv: 0.000</span>
+                        <input type="number" id="hallLimRight" class="limit-input" value="0" title="Right Limit (Gv)">
+                    </div>
+                </div>
+
+                <div class="inv-bar">
+                    <div class="inv-toggle" id="btnInvX"><div class="inv-dot-ui" id="invDotX"></div> Inv X</div>
+                    <div class="inv-toggle" id="btnInvY"><div class="inv-dot-ui" id="invDotY"></div> Inv Y</div>
+                    <div class="inv-toggle" id="btnInvZ"><div class="inv-dot-ui" id="invDotZ"></div> Inv Z</div>
+                </div>
+
+                <div class="control-grid">
+                    <div class="dpad">
+                        <button id="btnMoveYPos" class="move-btn" style="grid-column:2; grid-row:1" data-dx="0" data-dy="1" data-dz="0">Y+<div id="limDotYPos" class="limit-dot" data-axis="yPos"></div></button>
+                        <button id="btnMoveXNeg" class="move-btn" style="grid-column:1; grid-row:2" data-dx="-1" data-dy="0" data-dz="0">X-<div id="limDotXNeg" class="limit-dot" data-axis="xNeg"></div></button>
+                        <button id="btnMoveZero" class="move-btn zero-btn" style="grid-column:2; grid-row:2">ZERO</button>
+                        <button id="btnMoveXPos" class="move-btn" style="grid-column:3; grid-row:2" data-dx="1" data-dy="0" data-dz="0">X+<div id="limDotXPos" class="limit-dot" data-axis="xPos"></div></button>
+                        <button id="btnMoveYNeg" class="move-btn" style="grid-column:2; grid-row:3" data-dx="0" data-dy="-1" data-dz="0">Y-<div id="limDotYNeg" class="limit-dot" data-axis="yNeg"></div></button>
+                    </div>
+                    
+                    <div style="display: flex; gap: 8px; align-items: center;">
+                        
+                        <div style="display: flex; flex-direction: column; gap: 4px; width: 55px;">
+                            <label style="font-size:0.84em; color:#aa8855; text-align:center; margin-bottom:0;">Z-POS</label>
+                            <input type="number" id="zTargetInput" class="limit-input" style="margin:0; width:100%;" value="0.000" step="0.1" title="Absolute Z Target">
+                            <button id="btnGoZ" class="conn-btn" style="background:#2a241e; border: 1px solid #ffaa00; color:#ffcc00; width:100%; padding:4px 0;">GO</button>
+                        </div>
+
+                        <div class="z-axis">
+                            <button id="btnMoveZPos" class="move-btn" data-dx="0" data-dy="0" data-dz="1">Z+<div id="limDotZPos" class="limit-dot" data-axis="zPos"></div></button>
+                            <button id="btnMoveZNeg" class="move-btn" data-dx="0" data-dy="0" data-dz="-1">Z-<div id="limDotZNeg" class="limit-dot" data-axis="zNeg"></div></button>
+                        </div>
+                        <div style="display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%;">
+                            <label style="font-size:0.84em; color:#aa8855; margin-bottom:4px;">WHEEL</label>
+                            <input type="range" orient="vertical" id="zWheelSlider" min="0" max="6" value="0">
+                            <div id="zWheelValue" style="font-size:0.91em; color:#ffaa00; font-family:monospace; margin-top:4px;">0.100</div>
+                        </div>
+                    </div>
+                </div>
+
+                <button id="btnHardStop" class="btn-action btn-estop">🛑 EMERGENCY HARD STOP 🛑</button>
+
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px;">
+                    <div>
+                        <label>Sensitivity</label>
+                        <input type="range" id="scaleSlider" min="0" max="5" value="1">
+                        <div id="scaleValue" class="val-display">Step: 1.0</div>
+                    </div>
+                    <div>
+                        <label>Feed Rate (mm/m)</label>
+                        <input type="range" id="feedSlider" min="0" max="5" value="2">
+                        <div id="feedValue" class="val-display">F055</div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="log" id="status">System Boot Sequence Initiated...</div>
+
+            <div class="footer-tools">
+                <button id="btnSaveLog" class="btn-action btn-snap">SAVE DATA LOG</button>
+                <button id="btnExit" class="btn-action btn-exit">EXIT</button>
+            </div>
+        </div>
+
+        <div class="video-panel">
+            <div class="calib-bar">
+                <span style="font-size:1.12em; font-weight:bold; color:#f0f0f0;">Calibration:</span>
+                <input type="number" id="calibValue" class="calib-input" value="10" title="Length of drawn line">
+                <select id="calibUnit" class="calib-input">
+                    <option value="nm">nm</option>
+                    <option value="um" selected>µm</option>
+                    <option value="mm">mm</option>
+                </select>
+                <button id="btnCalib" class="cam-btn" style="padding: 4px 10px; font-size: 1.12em;">OFF</button>
+            </div>
+
+            <div class="video-wrapper">
+                <video id="rawVideo" style="display:none;" playsinline muted></video>
+                <canvas id="cameraFeed" title="Live Corrected RGB Stream"></canvas>
+                <canvas id="overlayCanvas" class="nav-mode" title="Click to Center. Scroll to Focus."></canvas>
+            </div>
+            
+            <canvas id="captureCanvas" style="display:none;"></canvas>
+
+            <div class="floating-panel" style="position: absolute; left: 15px; top: 15px; display: flex; flex-direction: column; gap: 15px; z-index: 50; padding: 10px 15px 15px 15px; border-radius: 8px; width: 140px;">
+                <div class="drag-handle" style="cursor: move; text-align: center; font-size: 0.8em; margin-bottom: 0px; border-bottom: 1px solid #4a3c2c; padding-bottom: 5px;">⋮⋮ DRAG ⋮⋮</div>
+                
+                <div style="display:flex; flex-direction:column; gap:8px;">
+                    <label style="color:#ffaa00; font-size:0.98em; text-align:center; font-weight:bold; margin-bottom: 0;">STREAM</label>
+                    <select id="cameraSelect" style="width: 100%; margin:0; padding: 6px;"></select>
+                    <button id="camToggle" class="cam-btn" style="padding: 6px;">Start Camera</button>
+                </div>
+                
+                <hr style="border-color:#4a3c2c; width:100%; margin:0;">
+                
+                <div style="display:flex; flex-direction:column; gap:8px;">
+                    <label style="color:#ffaa00; font-size:0.98em; text-align:center; font-weight:bold; margin-bottom: 0;">CAPTURE</label>
+                    <select id="imgFormat" style="width: 100%; margin:0; padding: 6px;">
+                        <option value="image/png">PNG</option>
+                        <option value="image/jpeg">JPEG</option>
+                    </select>
+                    <button id="btnCaptureImage" class="cam-btn" style="padding: 6px;">Capture Image</button>
+                </div>
+            </div>
+
+            <div class="floating-panel" style="position: absolute; bottom: 15px; left: 15px; display: flex; flex-direction: column; gap: 10px; z-index: 50; padding: 10px 15px 15px 15px; border-radius: 8px; width: 260px;">
+                <div class="drag-handle" style="cursor: move; text-align: center; font-size: 0.8em; margin-bottom: 0px; border-bottom: 1px solid #4a3c2c; padding-bottom: 5px;">⋮⋮ DRAG ⋮⋮</div>
+                
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 6px;">
+                    <label style="color:#ffaa00; font-size:0.95em; font-weight:bold; cursor:pointer;" title="Stream in Full RGB Color"><input type="checkbox" id="colorStreamToggle" checked> Color Feed</label>
+                    <label style="color:#f0f0f0; font-size:0.95em; font-weight:bold; cursor:pointer;"><input type="checkbox" id="laplaceDenoiseToggle"> Denoise</label>
+                    <label style="color:#f0f0f0; font-size:0.95em; font-weight:bold; cursor:pointer;"><input type="checkbox" id="laplaceEdgeToggle"> Edge Map</label>
+                    <label style="color:#ffcc00; font-size:0.95em; font-weight:bold; cursor:pointer;" title="Complement (255 - Pixel)"><input type="checkbox" id="invertToggle"> Invert</label>
+                </div>
+                
+                <hr style="border-color:#4a3c2c; width:100%; margin:0;">
+
+                <div style="display:flex; flex-direction:column; gap:8px;">
+                    <div style="display:flex; align-items:center; justify-content:space-between;">
+                        <label style="color:#f0f0f0; font-size:0.95em; font-weight:bold; cursor:pointer; margin:0;" title="Subtract Black Noise Frame"><input type="checkbox" id="applyDarkToggle"> Sub Noise</label>
+                        <button id="btnCapDark" class="cam-btn" style="padding: 3px 8px; font-size: 0.85em; width:auto;">Cap Noise</button>
+                    </div>
+                    
+                    <div style="display:flex; align-items:center; justify-content:space-between;">
+                        <label style="color:#f0f0f0; font-size:0.95em; font-weight:bold; cursor:pointer; margin:0;" title="Flat-Field Division"><input type="checkbox" id="applyBgToggle"> Div Flat</label>
+                        <div style="display:flex; align-items:center; gap: 5px;">
+                            <label style="color:#aa8855; font-size:0.85em; margin:0; font-weight:bold;">Mult:</label>
+                            <input type="number" id="bgMultiplier" value="1.0" min="0" max="1" step="0.05" style="width: 45px; padding: 2px 4px; margin: 0; font-size: 0.85em;">
+                        </div>
+                    </div>
+
+                    <div style="display:flex; align-items:center; justify-content:space-between;">
+                        <div style="display:flex; align-items:center; gap:5px;">
+                            <label style="color:#aa8855; font-size:0.85em; margin:0; font-weight:bold;">Z-Target:</label>
+                            <input type="number" id="calibZTarget" value="-30" style="width: 50px; padding: 2px 4px; margin: 0; font-size: 0.85em;" title="Z Target for FFC Capture">
+                        </div>
+                        <button id="btnCapFlat" class="cam-btn" style="padding: 3px 8px; font-size: 0.85em; width: auto;">Cap Flat</button>
+                    </div>
+                </div>
+            </div>
+
+            <div class="floating-panel" style="position: absolute; bottom: 15px; right: 15px; display: flex; flex-direction: column; gap: 10px; z-index: 50; padding: 10px 15px 15px 15px; border-radius: 8px; align-items: center;">
+                <div class="drag-handle" style="cursor: move; text-align: center; font-size: 0.8em; margin-bottom: 0px; border-bottom: 1px solid #4a3c2c; padding-bottom: 5px; width: 100%;">⋮⋮ DRAG ⋮⋮</div>
+                
+                <div style="display:flex; flex-direction:column; align-items:center; gap:5px;">
+                    <label style="color:#ffaa00; font-size:0.98em; font-weight:bold; margin:0;">INTENSITY</label>
+                    <canvas id="intensityBar" width="40" height="150" style="box-shadow: 0 0 10px rgba(255, 170, 0, 0.15);"></canvas>
+                </div>
+                <hr style="border-color:#4a3c2c; width:100%; margin:0;">
+                <div style="display:flex; flex-direction:column; align-items:center; gap:5px;">
+                    <label style="color:#ffaa00; font-size:0.98em; font-weight:bold; margin:0;">HISTOGRAM</label>
+                    <canvas id="histogramCanvas" width="256" height="80" style="background:#050505; border:1px solid #332b22; border-radius:3px;"></canvas>
+                </div>
+            </div>
+            
+        </div>
+
+        <div class="waypoint-panel">
+            <h2>WAYPOINTS</h2>
+            <button id="btnSaveWaypoint" class="cam-btn" style="width: 100%; border-radius: 4px; margin-bottom: 5px;">+ SAVE CURRENT POS</button>
+            
+            <select id="waypointList" size="12" style="flex: 1; width: 100%; background: #050505; color: #ffaa00; border: 1px solid #4a3c2c; font-family: Consolas, monospace; font-size: 1.19em; padding: 5px; outline: none;"></select>
+            
+            <div style="display: flex; gap: 8px; margin-top: 5px;">
+                <button id="btnGoWaypoint" class="btn-action btn-snap" style="flex: 2; padding: 8px;">🚀 GO TO POS</button>
+                <button id="btnDelWaypoint" class="btn-action btn-exit" style="flex: 1; padding: 8px;">DEL</button>
+            </div>
+
+            <hr style="border-color: #332b22; width: 100%; margin: 10px 0;">
+            <h2 style="font-size: 1.1em; border:none; margin:0; padding:0;">OBJECT ANALYSIS</h2>
+            <button id="btnToggleAnalysis" class="cam-btn" style="width: 100%; background: #ffaa00; color: black; margin-bottom: 5px;">Start Real-Time Tracking</button>
+
+            <hr style="border-color: #332b22; width: 100%; margin: 10px 0;">
+            <h2 style="font-size: 1.1em; border:none; margin:0; padding:0;">MACRO LOOP</h2>
+            
+            <div style="display: flex; gap: 5px; margin-top: 5px;">
+                <div style="flex: 1;">
+                    <label>Cycles</label>
+                    <input type="number" id="seqCycles" value="1" min="1">
+                </div>
+                <div style="flex: 1;">
+                    <label>Interval</label>
+                    <input type="text" id="seqInterval" value="00:00:00" placeholder="HH:MM:ss">
+                </div>
+            </div>
+            
+            <button id="btnSequence" class="cam-btn" style="width: 100%; margin-top: 5px;">▶ RUN SEQUENCE</button>
+        </div>
+
+    </div>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', () => {
+            const panels = document.querySelectorAll('.floating-panel');
+            panels.forEach(makeDraggable);
+
+            function makeDraggable(element) {
+                // 1. Drag Logic
+                let pos1 = 0, pos2 = 0, pos3 = 0, pos4 = 0;
+                const header = element.querySelector('.drag-handle');
+                if (header) {
+                    header.onmousedown = dragMouseDown;
+                } else {
+                    element.onmousedown = dragMouseDown;
+                }
+
+                function dragMouseDown(e) {
+                    e = e || window.event;
+                    if (['INPUT', 'BUTTON', 'SELECT', 'LABEL', 'CANVAS'].includes(e.target.tagName)) return;
+                    e.preventDefault();
+                    pos3 = e.clientX;
+                    pos4 = e.clientY;
+                    document.onmouseup = closeDragElement;
+                    document.onmousemove = elementDrag;
+                }
+
+                function elementDrag(e) {
+                    e = e || window.event;
+                    e.preventDefault();
+                    pos1 = pos3 - e.clientX;
+                    pos2 = pos4 - e.clientY;
+                    pos3 = e.clientX;
+                    pos4 = e.clientY;
+                    
+                    if (element.style.bottom) element.style.bottom = '';
+                    if (element.style.right) element.style.right = '';
+                    if (element.style.transform) element.style.transform = '';
+
+                    element.style.top = (element.offsetTop - pos2) + "px";
+                    element.style.left = (element.offsetLeft - pos1) + "px";
+                }
+
+                function closeDragElement() {
+                    document.onmouseup = null;
+                    document.onmousemove = null;
+                }
+
+                // 2. Corner Resizer Injection Logic
+                const resizer = document.createElement('div');
+                resizer.style.width = '16px';
+                resizer.style.height = '16px';
+                resizer.style.position = 'absolute';
+                resizer.style.right = '0';
+                resizer.style.bottom = '0';
+                resizer.style.cursor = 'se-resize';
+                resizer.style.background = 'linear-gradient(135deg, transparent 50%, #ffaa00 50%)';
+                resizer.style.borderBottomRightRadius = '8px'; // Matches panel border-radius
+                resizer.style.zIndex = '100';
+                element.appendChild(resizer);
+
+                resizer.addEventListener('mousedown', function(e) {
+                    e.preventDefault();
+                    e.stopPropagation(); // Protect from overlapping drag handler
+                    window.addEventListener('mousemove', resizePanel);
+                    window.addEventListener('mouseup', stopResize);
+                });
+
+                function resizePanel(e) {
+                    const rect = element.getBoundingClientRect();
+                    const newWidth = e.clientX - rect.left;
+                    const newHeight = e.clientY - rect.top;
+                    
+                    // Constrain against minimums established in CSS
+                    if (newWidth > 140) element.style.width = newWidth + 'px';
+                    if (newHeight > 100) element.style.height = newHeight + 'px';
+                }
+
+                function stopResize() {
+                    window.removeEventListener('mousemove', resizePanel);
+                    window.removeEventListener('mouseup', stopResize);
+                }
+            }
+        });
+    </script>
+
+    <script type="module" src="js/main.js"></script>
+</body>
+</html>
