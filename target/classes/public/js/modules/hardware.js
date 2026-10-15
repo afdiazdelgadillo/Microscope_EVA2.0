@@ -135,14 +135,56 @@ export async function goToAbsoluteZ(targetZ) {
     await sendStageCommand(gcode);
 }
 
-export function getFeedRateStr() {
-    const idx = document.getElementById('feedSlider').value;
-    return `F${State.stage.feedRates[idx].toString().padStart(3, '0')}`;
+export function setFeedRate(val, source = 'input') {
+    let num = parseInt(val, 10);
+    if (isNaN(num) || num < 1) num = 1;
+    if (num > 1000) num = 1000;
+
+    State.stage.currentFeedRate = num;
+
+    const feedInput = document.getElementById('feedInput');
+    if (feedInput && source !== 'typing') {
+        feedInput.value = num;
+    } else if (feedInput && parseInt(feedInput.value, 10) > 1000) {
+        feedInput.value = 1000;
+    }
+
+    const feedValue = document.getElementById('feedValue');
+    if (feedValue) {
+        feedValue.innerText = `F${num.toString().padStart(3, '0')}`;
+    }
+
+    const feedSlider = document.getElementById('feedSlider');
+    if (feedSlider && source !== 'slider') {
+        let closestIdx = 0;
+        let minDiff = Infinity;
+        State.stage.feedRates.forEach((rate, idx) => {
+            const diff = Math.abs(rate - num);
+            if (diff < minDiff) {
+                minDiff = diff;
+                closestIdx = idx;
+            }
+        });
+        feedSlider.value = closestIdx;
+    }
+    return num;
 }
 
 export function getFeedRateNum() {
-    const idx = document.getElementById('feedSlider').value;
-    return State.stage.feedRates[idx];
+    let num = parseInt(State.stage.currentFeedRate, 10);
+    if (isNaN(num) || num < 1) {
+        const feedInput = document.getElementById('feedInput');
+        num = feedInput ? parseInt(feedInput.value, 10) : 55;
+    }
+    if (isNaN(num) || num < 1) num = 1;
+    if (num > 1000) num = 1000;
+    State.stage.currentFeedRate = num;
+    return num;
+}
+
+export function getFeedRateStr() {
+    const num = getFeedRateNum();
+    return `F${num.toString().padStart(3, '0')}`;
 }
 
 export async function moveStage(actualDx, actualDy, actualDz, step) {
@@ -302,17 +344,55 @@ export async function readSerialStream() {
     }
 }
 
-export async function sendLightData() {
+export async function writeLightProtocol(iStr) {
+    State.connections.currentLightProtocol = iStr;
+    const lightValEl = document.getElementById('lightValue');
+    if (lightValEl) lightValEl.innerText = `Protocol: ${iStr} ${iStr} ${iStr}`;
+
     if (!State.connections.isLightConnected || !State.connections.illuminationPort) return;
-    const val = document.getElementById('lightSlider').value;
-    const i = Math.round(val * 25.5).toString().padStart(3, '0');
-    const cmd = `${i} ${i} ${i}\n`; 
+    const cmd = `${iStr} ${iStr} ${iStr}\n`;
     try {
         const encoder = new TextEncoder();
         const writer = State.connections.illuminationPort.writable.getWriter();
         await writer.write(encoder.encode(cmd));
         writer.releaseLock();
     } catch (e) {}
+}
+
+export async function sendLightData() {
+    const slider = document.getElementById('lightSlider');
+    const val = parseFloat(slider ? slider.value : 0) || 0;
+    if (State.camera.isStabilizingLed && val === 0) {
+        return; // Do not turn off the light until the light stabilizes
+    }
+    if (val > 0) {
+        State.connections.lightIntensity = val;
+    }
+    const i = Math.round(val * 25.5).toString().padStart(3, '0');
+    await writeLightProtocol(i);
+}
+
+export async function turnOnLight() {
+    const slider = document.getElementById('lightSlider');
+    let val = parseFloat(slider ? slider.value : 0) || 0;
+    if (val > 0) {
+        State.connections.lightIntensity = val;
+    } else {
+        val = State.connections.lightIntensity || 10;
+        if (slider) slider.value = val;
+    }
+    const i = Math.round(val * 25.5).toString().padStart(3, '0');
+    await writeLightProtocol(i);
+}
+
+export async function turnOffLight(force = false) {
+    if (State.camera.isStabilizingLed && !force) {
+        updateStatus("<span style='color:#ffaa00;'>Holding LED ON until intensity derivative stabilizes...</span>");
+        return;
+    }
+    const slider = document.getElementById('lightSlider');
+    if (slider) slider.value = 0;
+    await writeLightProtocol('000');
 }
 
 // Z-Axis Scroll Engine Handler

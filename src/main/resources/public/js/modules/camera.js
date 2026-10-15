@@ -1,7 +1,10 @@
 import { State } from '../core/state.js';
-import { updateStatus } from '../core/utils.js';
+import { sleep, updateStatus } from '../core/utils.js';
 import { analyzeFrame } from './vision.js';
-import { moveToCalibrationZ } from './hardware.js';
+import { 
+    moveToCalibrationZ, moveStage, getHardwareLimits, 
+    calculateGv, toggleHardStop, turnOnLight, turnOffLight 
+} from './hardware.js';
 
 export async function populateCameras() {
     try {
@@ -28,6 +31,124 @@ export async function populateCameras() {
     } catch (err) { console.error("Error enumerating devices:", err); }
 }
 
+export const DERIVATIVE_DT_MS = 10; // Fixed 10 ms time difference for dI/dt calculation
+
+/**
+ * Extracts total frame intensity I(t) = Σ (b * hist[b]), mean intensity,
+ * pixel count N = Σ hist[b], and min/max intensity directly from the
+ * already-calculated 256-bin histogram array.
+ */
+export function calculateFromHistogram(histArray) {
+    if (!histArray || histArray.length < 256) {
+        return { sumIntensity: 0, pixelCount: 0, minVal: 0, maxVal: 0, meanIntensity: 0 };
+    }
+    let sumIntensity = 0;
+    let pixelCount = 0;
+    let minVal = 255;
+    let maxVal = 0;
+
+    for (let b = 0; b < 256; b++) {
+        const count = histArray[b];
+        if (count > 0) {
+            if (b < minVal) minVal = b;
+            if (b > maxVal) maxVal = b;
+            sumIntensity += b * count;
+            pixelCount += count;
+        }
+    }
+    if (pixelCount === 0) minVal = 0;
+    const meanIntensity = pixelCount > 0 ? (sumIntensity / pixelCount) : 0;
+    return { sumIntensity, pixelCount, minVal, maxVal, meanIntensity };
+}
+
+/**
+ * Computes the normalized L1 histogram shift ratio in [0, 1] between two 256-bin histograms.
+ * Represents the fraction of pixels that moved between intensity bins.
+ */
+function calculateHistogramShiftRatio(histA, histB, totalPixels) {
+    if (!histA || !histB || totalPixels <= 0) return 0;
+    let absDiffSum = 0;
+    for (let b = 0; b < 256; b++) {
+        absDiffSum += Math.abs(histA[b] - histB[b]);
+    }
+    return absDiffSum / (2 * totalPixels);
+}
+
+function startHistogramDerivativeLoop() {
+    stopHistogramDerivativeLoop();
+    State.camera.derivativeIntervalId = setInterval(sampleHistogramDerivative10ms, DERIVATIVE_DT_MS);
+}
+
+function stopHistogramDerivativeLoop() {
+    if (State.camera.derivativeIntervalId !== null) {
+        clearInterval(State.camera.derivativeIntervalId);
+        State.camera.derivativeIntervalId = null;
+    }
+}
+
+/**
+ * Performs the time derivative dI/dt with a fixed time difference Δt = 10 ms
+ * using the intensity sum I(t) = Σ (b * hist[b]) from the calculated histogram.
+ */
+function sampleHistogramDerivative10ms() {
+    if (!State.camera.isProcessingStream) return;
+
+    const now = performance.now();
+    // Ensure the histogram is freshly computed from the live video feed at 10 ms resolution
+    if (
+        State.camera.isStabilizingLed ||
+        !State.camera.currentHistogram ||
+        State.camera.lastHistogramUpdateMs === null ||
+        (now - State.camera.lastHistogramUpdateMs) >= (DERIVATIVE_DT_MS - 2)
+    ) {
+        updateFrameAndHistogram();
+    }
+
+    const hist = State.camera.currentHistogram;
+    if (!hist) return;
+
+    // Get intensity data strictly from the already-calculated histogram
+    const { sumIntensity, pixelCount, meanIntensity } = calculateFromHistogram(hist);
+    const dt = DERIVATIVE_DT_MS; // 10 ms time difference
+
+    let dIdt = 0;
+    let dMeandt = 0;
+    if (State.camera.prevFrameIntensitySum !== null && State.camera.prevFrameMeanIntensity !== null) {
+        dIdt = (sumIntensity - State.camera.prevFrameIntensitySum) / dt;
+        dMeandt = (meanIntensity - State.camera.prevFrameMeanIntensity) / dt;
+    }
+
+    State.camera.prevFrameIntensitySum = sumIntensity;
+    State.camera.prevFrameMeanIntensity = meanIntensity;
+    State.camera.frameIntensitySum = sumIntensity;
+    State.camera.frameMeanIntensity = meanIntensity;
+    State.camera.pixelCount = pixelCount;
+    State.camera.frameTimestamp = now;
+    State.camera.intensityDerivative = dIdt;
+    State.camera.meanIntensityDerivative = dMeandt;
+
+    const sumEl = document.getElementById('intensitySumVal');
+    const derivEl = document.getElementById('intensityDerivVal');
+    if (sumEl) sumEl.textContent = `ΣI: ${sumIntensity.toLocaleString()}`;
+    if (derivEl) derivEl.textContent = `dI/dt: ${Math.round(dIdt).toLocaleString()}/ms`;
+
+    if (typeof State.camera.onFrameIntensitySample === 'function') {
+        try {
+            State.camera.onFrameIntensitySample({
+                frameCount: State.camera.frameCount,
+                timestamp: now,
+                dt: dt,
+                sumIntensity: sumIntensity,
+                meanIntensity: meanIntensity,
+                pixelCount: pixelCount,
+                dIdt: dIdt,
+                dMeandt: dMeandt,
+                histogram: hist
+            });
+        } catch (err) {}
+    }
+}
+
 export async function toggleCamera() {
     const btn = document.getElementById('camToggle');
     const cameraSelect = document.getElementById('cameraSelect');
@@ -36,6 +157,7 @@ export async function toggleCamera() {
     const overlayCanvas = document.getElementById('overlayCanvas');
     
     if (State.connections.videoStream) {
+        stopHistogramDerivativeLoop();
         State.connections.videoStream.getTracks().forEach(track => track.stop());
         State.connections.videoStream = null; 
         rawVideo.srcObject = null;
@@ -47,9 +169,22 @@ export async function toggleCamera() {
         const ctx = canvas.getContext('2d');
         ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-        // Clear the histogram as well
+        // Clear the histogram and intensity telemetry as well
         const histCanvas = document.getElementById('histogramCanvas');
         if(histCanvas) histCanvas.getContext('2d').clearRect(0, 0, histCanvas.width, histCanvas.height);
+        State.camera.currentHistogram = null;
+        State.camera.lastHistogramUpdateMs = null;
+        State.camera.prevFrameIntensitySum = null;
+        State.camera.prevFrameMeanIntensity = null;
+        State.camera.frameTimestamp = null;
+        State.camera.frameIntensitySum = 0;
+        State.camera.frameMeanIntensity = 0;
+        State.camera.intensityDerivative = 0;
+        State.camera.meanIntensityDerivative = 0;
+        const sumEl = document.getElementById('intensitySumVal');
+        const derivEl = document.getElementById('intensityDerivVal');
+        if (sumEl) sumEl.textContent = "ΣI: 0";
+        if (derivEl) derivEl.textContent = "dI/dt: 0/ms";
 
     } else {
         try {
@@ -74,6 +209,7 @@ export async function toggleCamera() {
                 overlayCanvas.height = 720;
                 State.camera.isProcessingStream = true;
                 processFrameRGB();
+                startHistogramDerivativeLoop();
             };
         } catch (err) { alert("Camera access denied or error: " + err); }
     }
@@ -148,11 +284,12 @@ export function drawHistogram(histArray) {
     ctx.fill();
 }
 
-export function processFrameRGB() {
-    if (!State.camera.isProcessingStream) return;
+export function updateFrameAndHistogram() {
+    if (!State.camera.isProcessingStream) return null;
 
     const rawVideo = document.getElementById('rawVideo');
     const cameraFeedCanvas = document.getElementById('cameraFeed');
+    if (!rawVideo || !cameraFeedCanvas || !cameraFeedCanvas.width) return null;
     const displayCtx = cameraFeedCanvas.getContext('2d', { willReadFrequently: true });
     
     let w = cameraFeedCanvas.width;
@@ -176,6 +313,14 @@ export function processFrameRGB() {
             bgImgData.data.set(State.camera.darkFrameRGB); bgCtx.putImageData(bgImgData, 0, 0);
             
             bgCanvas.toBlob(async (blob) => {
+                if (State.session.expFolderHandle && blob) {
+                    try {
+                        const fh = await State.session.expFolderHandle.getFileHandle("noise_darkframe_rgb.png", { create: true });
+                        const wr = await fh.createWritable();
+                        await wr.write(blob);
+                        await wr.close();
+                    } catch (e) {}
+                }
                 if (State.session.experiment) {
                     let fd = new FormData();
                     fd.append("experiment", State.session.experiment);
@@ -196,6 +341,14 @@ export function processFrameRGB() {
             bgImgData.data.set(State.camera.backgroundFrameRGB); bgCtx.putImageData(bgImgData, 0, 0);
 
             bgCanvas.toBlob(async (blob) => {
+                if (State.session.expFolderHandle && blob) {
+                    try {
+                        const fh = await State.session.expFolderHandle.getFileHandle("background_flatfield_rgb.png", { create: true });
+                        const wr = await fh.createWritable();
+                        await wr.write(blob);
+                        await wr.close();
+                    } catch (e) {}
+                }
                 if (State.session.experiment) {
                     let fd = new FormData();
                     fd.append("experiment", State.session.experiment);
@@ -213,8 +366,6 @@ export function processFrameRGB() {
     let bgMult = parseFloat(document.getElementById('bgMultiplier').value) || 1.0;
     let invert = document.getElementById('invertToggle').checked;
     let isColorFeed = document.getElementById('colorStreamToggle').checked;
-
-    let minVal = 255, maxVal = 0, sumVal = 0;
 
     for (let i = 0; i < len; i++) {
         let off = i * 4;
@@ -259,16 +410,21 @@ export function processFrameRGB() {
 
         if (isColorFeed) { data[off] = r; data[off+1] = g; data[off+2] = b; } 
         else { data[off] = lumInt; data[off+1] = lumInt; data[off+2] = lumInt; }
-
-        if (lumInt < minVal) minVal = lumInt;
-        if (lumInt > maxVal) maxVal = lumInt;
-        sumVal += lumInt;
     }
+
+    // Store the calculated histogram and extract intensity statistics directly from it
+    const { sumIntensity, pixelCount, minVal, maxVal, meanIntensity } = calculateFromHistogram(hist);
+    State.camera.currentHistogram = hist;
+    State.camera.lastHistogramUpdateMs = performance.now();
+    State.camera.frameCount = (State.camera.frameCount || 0) + 1;
+    State.camera.pixelCount = pixelCount;
+    State.camera.frameIntensitySum = sumIntensity;
+    State.camera.frameMeanIntensity = meanIntensity;
 
     if (State.analysis.isObjectAnalysisActive) { analyzeFrame(gray, w, h); }
     
     drawOverlay();
-    drawIntensityBar(minVal, maxVal, sumVal / len);
+    drawIntensityBar(minVal, maxVal, meanIntensity);
     drawHistogram(hist); // Deploy Histogram Frame
 
     if (State.analysis.isObjectAnalysisActive && State.analysis.currentObjects.length > 0) {
@@ -281,6 +437,12 @@ export function processFrameRGB() {
     }
 
     displayCtx.putImageData(imgData, 0, 0);
+    return hist;
+}
+
+export function processFrameRGB() {
+    if (!State.camera.isProcessingStream) return;
+    updateFrameAndHistogram();
     requestAnimationFrame(processFrameRGB);
 }
 
@@ -452,8 +614,466 @@ export function getCanvasCoords(e) {
     };
 }
 
-export function captureImage(customName = null) {
+export function updateCalibrationScale() {
+    const calibValEl = document.getElementById('calibValue');
+    const calibUnitEl = document.getElementById('calibUnit');
+    const calibVal = parseFloat(calibValEl ? calibValEl.value : 0);
+    const calibUnit = calibUnitEl ? calibUnitEl.value : 'um';
+
+    State.calibration.activeUnit = calibUnit;
+
+    const dx = State.calibration.lineEnd.x - State.calibration.lineStart.x;
+    const dy = State.calibration.lineEnd.y - State.calibration.lineStart.y;
+    const distPx = Math.sqrt(dx * dx + dy * dy);
+
+    if (distPx > 2 && !isNaN(calibVal) && calibVal > 0) {
+        State.calibration.pixelsPerUnit = distPx / calibVal;
+        updateStatus(`<span style="color:#00ffcc;">Scale Calibrated: ${State.calibration.pixelsPerUnit.toFixed(2)} px/${calibUnit} (${distPx.toFixed(1)} px = ${calibVal} ${calibUnit})</span>`);
+    }
+}
+
+export function handleOverlayMouseDown(e) {
+    if (!State.calibration.isCalibMode || !State.connections.videoStream) return;
+    const coords = getCanvasCoords(e);
+    State.calibration.isDrawingLine = true;
+    State.calibration.lineStart = { x: coords.x, y: coords.y };
+    State.calibration.lineEnd = { x: coords.x, y: coords.y };
+}
+
+export function handleOverlayMouseMove(e) {
+    if (!State.calibration.isCalibMode || !State.calibration.isDrawingLine) return;
+    const coords = getCanvasCoords(e);
+    State.calibration.lineEnd = { x: coords.x, y: coords.y };
+}
+
+export function handleOverlayMouseUp(e) {
+    if (!State.calibration.isCalibMode || !State.calibration.isDrawingLine) return;
+    State.calibration.isDrawingLine = false;
+    const coords = getCanvasCoords(e);
+    State.calibration.lineEnd = { x: coords.x, y: coords.y };
+    updateCalibrationScale();
+}
+
+export function handleOverlayClick(e) {
+    if (State.calibration.isCalibMode) return;
+    if (!State.connections.videoStream) return;
+    if (State.calibration.pixelsPerUnit <= 0) {
+        return updateStatus("<span style='color:orange;'>Calibrate scale first to enable Click-to-Center navigation.</span>");
+    }
+    if (!State.connections.isStageConnected) return updateStatus("ERROR: Stage Port OFF.");
+    if (State.stage.isHalted) return updateStatus("<span style='color:red;'>ERROR: Firmware is locked.</span>");
+
+    const coords = getCanvasCoords(e);
+    if (State.calibration.clickTimeout) clearTimeout(State.calibration.clickTimeout);
+
+    State.calibration.clickTimeout = setTimeout(() => {
+        const overlayCanvas = document.getElementById('overlayCanvas');
+        const cx = overlayCanvas.width / 2;
+        const cy = overlayCanvas.height / 2;
+
+        let unitFactor = 1.0;
+        if (State.calibration.activeUnit === "um") unitFactor = 0.001;
+        else if (State.calibration.activeUnit === "nm") unitFactor = 0.000001;
+
+        const rawDx = ((coords.x - cx) / State.calibration.pixelsPerUnit) * unitFactor;
+        const rawDy = ((cy - coords.y) / State.calibration.pixelsPerUnit) * unitFactor;
+
+        const actualDx = rawDx * State.stage.invX;
+        const actualDy = rawDy * State.stage.invY;
+
+        const { limL, limR } = getHardwareLimits();
+        const Gv = calculateGv();
+        if (actualDx !== 0 || actualDy !== 0) {
+            if (Gv >= limR && limR !== 0) return toggleHardStop(true, `Pre-Halt (Gv Limit)`);
+            if (Gv <= limL && limL !== 0) return toggleHardStop(true, `Pre-Halt (Gv Limit)`);
+        }
+
+        const nx = State.stage.currX + actualDx;
+        const ny = State.stage.currY + actualDy;
+
+        if (actualDx > 0 && State.session.limits.xPos !== null && nx > State.session.limits.xPos) return updateStatus("SW BOUND: X+");
+        if (actualDx < 0 && State.session.limits.xNeg !== null && nx < State.session.limits.xNeg) return updateStatus("SW BOUND: X-");
+        if (actualDy > 0 && State.session.limits.yPos !== null && ny > State.session.limits.yPos) return updateStatus("SW BOUND: Y+");
+        if (actualDy < 0 && State.session.limits.yNeg !== null && ny < State.session.limits.yNeg) return updateStatus("SW BOUND: Y-");
+
+        moveStage(actualDx, actualDy, 0, 1.0);
+    }, 200);
+}
+
+// ==========================================
+// RECENT IMAGES GALLERY & MAGNIFIED VIEWER
+// ==========================================
+export function addRecentImage(entry) {
+    State.camera.recentImages.push(entry);
+    State.camera.selectedRecentIndex = State.camera.recentImages.length - 1;
+    renderRecentImages();
+    if (State.camera.isRecentModalOpen) {
+        updateRecentModalView();
+    }
+}
+
+export function renderRecentImages() {
+    const listEl = document.getElementById('recentImagesList');
+    if (!listEl) return;
+
+    const images = State.camera.recentImages;
+    if (!images || images.length === 0) {
+        listEl.innerHTML = '<div class="recent-empty">No images captured yet</div>';
+        return;
+    }
+
+    listEl.innerHTML = '';
+    // Render most recent first in the sidebar box for immediate visibility
+    for (let i = images.length - 1; i >= 0; i--) {
+        const item = images[i];
+        const row = document.createElement('div');
+        row.className = 'recent-item' + (i === State.camera.selectedRecentIndex ? ' active' : '');
+        row.title = `Click to magnify: ${item.name}`;
+
+        const thumb = document.createElement('img');
+        thumb.className = 'recent-thumb';
+        thumb.src = item.url;
+        thumb.alt = item.name;
+
+        const info = document.createElement('div');
+        info.className = 'recent-info';
+
+        const nameSpan = document.createElement('span');
+        nameSpan.className = 'recent-name';
+        nameSpan.textContent = item.name;
+
+        const timeSpan = document.createElement('span');
+        timeSpan.className = 'recent-time';
+        const stabBadge = (item.stabTimeMs !== undefined && item.stabTimeMs !== null)
+            ? ` • t_stab: ${item.stabTimeMs}ms`
+            : '';
+        timeSpan.textContent = `${item.time || ''}${stabBadge}`;
+
+        info.appendChild(nameSpan);
+        info.appendChild(timeSpan);
+        row.appendChild(thumb);
+        row.appendChild(info);
+
+        row.addEventListener('click', () => {
+            openRecentModal(i);
+        });
+
+        listEl.appendChild(row);
+    }
+}
+
+export function updateRecentModalView() {
+    const modal = document.getElementById('recentImagesModal');
+    if (!modal) return;
+
+    const images = State.camera.recentImages;
+    if (!images || images.length === 0) {
+        closeRecentModal();
+        return;
+    }
+
+    if (State.camera.selectedRecentIndex < 0 || State.camera.selectedRecentIndex >= images.length) {
+        State.camera.selectedRecentIndex = images.length - 1;
+    }
+
+    const idx = State.camera.selectedRecentIndex;
+    const current = images[idx];
+
+    const titleEl = document.getElementById('recentModalTitle');
+    const counterEl = document.getElementById('recentModalCounter');
+    const imgEl = document.getElementById('recentModalImg');
+    const captionEl = document.getElementById('recentModalCaption');
+    const stripEl = document.getElementById('recentModalStrip');
+
+    if (titleEl) titleEl.textContent = current.name;
+    if (counterEl) counterEl.textContent = `${idx + 1} / ${images.length}`;
+    if (imgEl) {
+        imgEl.src = current.url;
+        imgEl.alt = current.name;
+    }
+    if (captionEl) {
+        const stabInfo = (current.stabTimeMs !== undefined && current.stabTimeMs !== null)
+            ? `  •  LED Stab: ${current.stabTimeMs} ms`
+            : '';
+        captionEl.textContent = `${current.name}${current.time ? '  •  Captured at ' + current.time : ''}${stabInfo}`;
+    }
+
+    if (stripEl) {
+        stripEl.innerHTML = '';
+        images.forEach((item, i) => {
+            const cell = document.createElement('div');
+            cell.className = 'recent-strip-item' + (i === idx ? ' active' : '');
+            cell.title = item.name;
+
+            const thumb = document.createElement('img');
+            thumb.src = item.url;
+            thumb.alt = item.name;
+
+            const label = document.createElement('span');
+            label.textContent = item.name;
+
+            cell.appendChild(thumb);
+            cell.appendChild(label);
+            cell.addEventListener('click', () => {
+                State.camera.selectedRecentIndex = i;
+                renderRecentImages();
+                updateRecentModalView();
+            });
+            stripEl.appendChild(cell);
+        });
+    }
+}
+
+export function openRecentModal(index = null) {
+    const images = State.camera.recentImages;
+    if (!images || images.length === 0) {
+        updateStatus("<span style='color:orange;'>No recent images to magnify yet. Capture an image first.</span>");
+        return;
+    }
+    if (index !== null && index >= 0 && index < images.length) {
+        State.camera.selectedRecentIndex = index;
+    } else if (State.camera.selectedRecentIndex < 0) {
+        State.camera.selectedRecentIndex = images.length - 1;
+    }
+
+    State.camera.isRecentModalOpen = true;
+    const modal = document.getElementById('recentImagesModal');
+    if (modal) modal.style.display = 'flex';
+    renderRecentImages();
+    updateRecentModalView();
+}
+
+export function closeRecentModal() {
+    State.camera.isRecentModalOpen = false;
+    const modal = document.getElementById('recentImagesModal');
+    if (modal) modal.style.display = 'none';
+}
+
+export function stepRecentImage(delta) {
+    const images = State.camera.recentImages;
+    if (!images || images.length === 0) return;
+    const len = images.length;
+    State.camera.selectedRecentIndex = (State.camera.selectedRecentIndex + delta + len) % len;
+    renderRecentImages();
+    updateRecentModalView();
+}
+
+async function decodePngFileToRGBBuffer(fileHandle, width = 1280, height = 720) {
+    const file = await fileHandle.getFile();
+    const bitmap = await createImageBitmap(file);
+    const c = document.createElement('canvas');
+    c.width = width;
+    c.height = height;
+    const ctx = c.getContext('2d');
+    ctx.drawImage(bitmap, 0, 0, width, height);
+    return new Uint8Array(ctx.getImageData(0, 0, width, height).data);
+}
+
+export async function restoreCalibrationFramesFromFolder(folderHandle) {
+    if (!folderHandle) return;
+    try {
+        const darkHandle = await folderHandle.getFileHandle("noise_darkframe_rgb.png");
+        State.camera.darkFrameRGB = await decodePngFileToRGBBuffer(darkHandle);
+        updateStatus("<span style='color:#00ffcc;'>Restored Sub Noise dark frame from session folder.</span>");
+    } catch (e) {}
+
+    try {
+        const flatHandle = await folderHandle.getFileHandle("background_flatfield_rgb.png");
+        State.camera.backgroundFrameRGB = await decodePngFileToRGBBuffer(flatHandle);
+        updateStatus("<span style='color:#00ffcc;'>Restored Div Flat reference frame from session folder.</span>");
+    } catch (e) {}
+}
+
+// ==========================================
+// DYNAMIC LED STABILIZATION ENGINE (dI/dt from Histogram, Δt = 10 ms)
+// ==========================================
+export function updateLedStabilizationUI(stabTimeMs) {
+    if (stabTimeMs === null || stabTimeMs === undefined || isNaN(stabTimeMs)) return;
+    const rounded = Math.round(Number(stabTimeMs));
+    State.camera.ledStabilizationTimeMs = rounded;
+    const el = document.getElementById('ledStabTimeDisplay');
+    if (el) {
+        el.textContent = `LED Stab Time: ${rounded} ms (Δt=10ms, dI/dt≈0)`;
+    }
+}
+
+/**
+ * Monitors the histogram-derived intensity sum I(t) = Σ_{b=0}^{255} b * hist[b](t)
+ * and its time derivative dI/dt(t) = (I(t) - I(t - 10 ms)) / 10 ms.
+ * Finds the time where intensity stabilizes and does not overshoot or plateaus
+ * (derivative zero at time larger than t = t + 1), stores the obtained time as
+ * LED stabilization time, and resolves only once the light has stabilized.
+ */
+export function waitForLedStabilization(imageName = "", baselineHist = null, wasLightOff = false) {
     return new Promise((resolve) => {
+        // Ensure the 10 ms histogram derivative loop is running
+        startHistogramDerivativeLoop();
+
+        const tStart = performance.now();
+        const samples = [];
+        let resolved = false;
+
+        // Compute baseline histogram statistics before illumination transition
+        const refHist = baselineHist
+            ? new Uint32Array(baselineHist)
+            : new Uint32Array(State.camera.currentHistogram);
+        const baselineStats = calculateFromHistogram(refHist);
+
+        // Determine if an active LED turn-on response from dark/dim state is expected
+        const lightSliderVal = parseInt(document.getElementById('lightSlider')?.value || "0", 10);
+        const expectIlluminationRise = Boolean(
+            State.connections.isLightConnected && wasLightOff && lightSliderVal > 0
+        );
+        let responseDetected = !expectIlluminationRise;
+        let responseStepIndex = expectIlluminationRise ? -1 : 0;
+
+        // Thresholds for Δt = 10 ms histogram derivative plateau (dI/dt ≈ 0 without overshoot)
+        const DERIV_ZERO_MEAN_PER_MS = 0.012;    // <= 0.12 gray-level change per 10 ms step per pixel
+        const DERIV_ZERO_REL_PER_MS = 0.00015;   // <= 0.15% relative intensity change per 10 ms step
+        const PLATEAU_WINDOW_STEPS = 16;         // 16 consecutive 10 ms steps (160 ms across ~5 camera frames)
+        const WINDOW_SLOPE_TOLERANCE = 0.004;    // Net drift across 160 ms plateau window <= 0.004 gray/ms
+        const MAX_RESPONSE_WAIT_MS = 3000;       // Max wait for initial serial + LED hardware response if sample is opaque
+        const MAX_STABILIZATION_WAIT_MS = 8000;  // Overall safety ceiling so capture cannot hang indefinitely
+
+        const cleanupAndFinish = (stabTimeMs, finalSample) => {
+            if (resolved) return;
+            resolved = true;
+            State.camera.onFrameIntensitySample = null;
+            State.camera.isLedStabilized = true;
+            clearTimeout(safetyTimeout);
+
+            const validStabMs = Math.max(DERIVATIVE_DT_MS, Math.round(stabTimeMs));
+            updateLedStabilizationUI(validStabMs);
+
+            const record = {
+                timestamp: new Date().toISOString(),
+                imageName: imageName || "capture",
+                stabilizationTimeMs: validStabMs,
+                dtMs: DERIVATIVE_DT_MS,
+                finalIntensitySum: finalSample ? Math.round(finalSample.sumIntensity) : (State.camera.frameIntensitySum || 0),
+                finalDerivative: finalSample ? Number(finalSample.dIdt.toFixed(2)) : 0,
+                framesElapsed: samples.length
+            };
+            State.camera.ledStabilizationHistory.push(record);
+            if (State.camera.ledStabilizationHistory.length > 200) {
+                State.camera.ledStabilizationHistory.shift();
+            }
+
+            resolve(record);
+        };
+
+        const handleSample = (sample) => {
+            if (resolved) return;
+
+            const k = samples.length; // Discrete 10 ms step index t = 0, 1, 2, ...
+            const N = Math.max(1, sample.pixelCount || baselineStats.pixelCount || (1280 * 720));
+            const elapsedMs = sample.timestamp - tStart;
+
+            if (k === 0) {
+                samples.push({
+                    k: 0,
+                    timestamp: sample.timestamp,
+                    elapsedMs: elapsedMs,
+                    sumIntensity: sample.sumIntensity,
+                    meanIntensity: sample.meanIntensity,
+                    dt: DERIVATIVE_DT_MS,
+                    dIdt: 0,
+                    meanDeriv: 0,
+                    relDeriv: 0,
+                    isZeroDeriv: false
+                });
+                return;
+            }
+
+            const prev = samples[k - 1];
+            const dt = DERIVATIVE_DT_MS; // Fixed Δt = 10 ms derivative step
+            const dIdt = (sample.sumIntensity - prev.sumIntensity) / dt;
+            const meanDeriv = (sample.meanIntensity - prev.meanIntensity) / dt;
+            const relDeriv = Math.abs(dIdt) / Math.max(sample.sumIntensity, N * 10);
+
+            // Detect when the histogram reflects the LED turning on from the dark baseline
+            if (!responseDetected) {
+                const meanDeltaFromBaseline = Math.abs(sample.meanIntensity - baselineStats.meanIntensity);
+                const histShiftRatio = sample.histogram
+                    ? calculateHistogramShiftRatio(sample.histogram, refHist, N)
+                    : 0;
+
+                if (
+                    meanDeltaFromBaseline >= 1.0 ||
+                    histShiftRatio >= 0.025 ||
+                    Math.abs(meanDeriv) >= 0.025 ||
+                    elapsedMs >= MAX_RESPONSE_WAIT_MS
+                ) {
+                    responseDetected = true;
+                    responseStepIndex = k;
+                }
+            }
+
+            const isZeroDeriv = (Math.abs(meanDeriv) <= DERIV_ZERO_MEAN_PER_MS) || (relDeriv <= DERIV_ZERO_REL_PER_MS);
+
+            const currentEntry = {
+                k: k,
+                timestamp: sample.timestamp,
+                elapsedMs: elapsedMs,
+                sumIntensity: sample.sumIntensity,
+                meanIntensity: sample.meanIntensity,
+                dt: dt,
+                dIdt: dIdt,
+                meanDeriv: meanDeriv,
+                relDeriv: relDeriv,
+                isZeroDeriv: isZeroDeriv
+            };
+            samples.push(currentEntry);
+
+            // Enforce time larger than t = t + 1 (discrete step k > 2) AND wait until LED response has begun
+            if (k <= 2 || !responseDetected) return;
+
+            // Ensure we have collected a full plateau window of 10 ms steps after the LED response started
+            const stepsSinceResponse = k - Math.max(0, responseStepIndex);
+            if (stepsSinceResponse < PLATEAU_WINDOW_STEPS || samples.length <= PLATEAU_WINDOW_STEPS) {
+                return;
+            }
+
+            // Verify that across the entire window [k - PLATEAU_WINDOW_STEPS + 1 ... k]:
+            // 1. Every 10 ms step has dI/dt ≈ 0 (isZeroDeriv === true),
+            // 2. Net slope across the window is ≈ 0 (not slowly creeping up/down),
+            // 3. Second derivative / half-window slope difference is ≈ 0 (no overshoot inflection).
+            const winStartIdx = k - PLATEAU_WINDOW_STEPS;
+            for (let i = winStartIdx + 1; i <= k; i++) {
+                if (!samples[i].isZeroDeriv) {
+                    return;
+                }
+            }
+
+            const startSample = samples[winStartIdx];
+            const midSample = samples[winStartIdx + Math.floor(PLATEAU_WINDOW_STEPS / 2)];
+            const endSample = currentEntry;
+
+            const windowDurationMs = PLATEAU_WINDOW_STEPS * DERIVATIVE_DT_MS;
+            const halfDurationMs = Math.max(DERIVATIVE_DT_MS, (PLATEAU_WINDOW_STEPS / 2) * DERIVATIVE_DT_MS);
+
+            const netWindowSlope = Math.abs(endSample.meanIntensity - startSample.meanIntensity) / windowDurationMs;
+            const firstHalfSlope = (midSample.meanIntensity - startSample.meanIntensity) / halfDurationMs;
+            const secondHalfSlope = (endSample.meanIntensity - midSample.meanIntensity) / halfDurationMs;
+            const curvatureDiff = Math.abs(secondHalfSlope - firstHalfSlope);
+
+            if (netWindowSlope <= WINDOW_SLOPE_TOLERANCE && curvatureDiff <= (WINDOW_SLOPE_TOLERANCE * 1.5)) {
+                cleanupAndFinish(elapsedMs, currentEntry);
+            }
+        };
+
+        State.camera.onFrameIntensitySample = handleSample;
+
+        const safetyTimeout = setTimeout(() => {
+            const lastSample = samples.length > 0 ? samples[samples.length - 1] : null;
+            const totalElapsed = performance.now() - tStart;
+            cleanupAndFinish(totalElapsed, lastSample);
+        }, MAX_STABILIZATION_WAIT_MS);
+    });
+}
+
+export function captureImage(customName = null) {
+    return new Promise(async (resolve) => {
         if (!State.connections.videoStream || !State.session.experiment) {
             if (!State.session.experiment) updateStatus("<span style='color:red;'>Error: No Session Directory.</span>");
             return resolve(false);
@@ -470,62 +1090,113 @@ export function captureImage(customName = null) {
             customName = userInput;
         }
 
-        const cameraFeedCanvas = document.getElementById('cameraFeed');
-        const canvas = document.getElementById('captureCanvas');
-        const format = document.getElementById('imgFormat').value;
-        const ext = format.split('/')[1];
+        // Refresh histogram baseline prior to turning ON illumination
+        updateFrameAndHistogram();
+        const baselineHist = new Uint32Array(State.camera.currentHistogram);
+        const currentProto = (State.connections.currentLightProtocol || '000').trim();
+        const wasLightOff = (currentProto === '000' || currentProto === '000 000 000');
 
-        canvas.width = cameraFeedCanvas.width; 
-        canvas.height = cameraFeedCanvas.height;
-        const ctx = canvas.getContext('2d');
-        
-        const edge = document.getElementById('laplaceEdgeToggle').checked;
-        const denoise = document.getElementById('laplaceDenoiseToggle').checked;
-        
-        if (edge && denoise) ctx.filter = "url(#filterBoth)";
-        else if (edge) ctx.filter = "url(#filterEdge)";
-        else if (denoise) ctx.filter = "url(#filterDenoise)";
-        
-        ctx.drawImage(cameraFeedCanvas, 0, 0, canvas.width, canvas.height);
-        ctx.filter = "none"; 
-        
-        if (State.calibration.pixelsPerUnit > 0) renderScaleBar(ctx, canvas.width, canvas.height);
-        
-        canvas.toBlob(async (blob) => {
-            const fileName = `${customName}.${ext}`;
-            try {
-                let fd = new FormData();
-                fd.append("experiment", State.session.experiment);
-                fd.append("filename", fileName);
-                fd.append("image", blob, fileName);
+        // Lock illumination so the light cannot be turned off until stabilization completes
+        State.camera.isStabilizingLed = true;
+        State.camera.isLedStabilized = false;
 
-                let measurementsStr = "";
-                if (State.analysis.isObjectAnalysisActive && State.analysis.currentObjects.length > 0) {
-                    let timeStr = new Date().toLocaleTimeString('en-US', { hour12: false });
-                    let scaleSq = (State.calibration.pixelsPerUnit > 0) ? (State.calibration.pixelsPerUnit * State.calibration.pixelsPerUnit) : 1;
-                    let scaleLin = (State.calibration.pixelsPerUnit > 0) ? State.calibration.pixelsPerUnit : 1;
+        try {
+            // Turn ON illumination and wait dynamically until histogram intensity sum ΣI plateaus (dI/dt = 0 for t > t + 1, Δt = 10 ms)
+            await turnOnLight();
+            updateStatus("<span style='color:#ffaa00;'>Stabilizing LED illumination (histogram dI/dt, Δt = 10 ms)...</span>");
+            const stabRecord = await waitForLedStabilization(customName, baselineHist, wasLightOff);
+            const stabTimeMs = stabRecord.stabilizationTimeMs;
 
-                    State.analysis.currentObjects.forEach(obj => {
-                        let a = (obj.area / scaleSq).toFixed(3);
-                        let p = (obj.perimeter / scaleLin).toFixed(3);
-                        let cxScaled = (obj.cx / scaleLin).toFixed(3);
-                        let cyScaled = (obj.cy / scaleLin).toFixed(3);
-                        
-                        measurementsStr += `${fileName}\t${obj.id}\t${timeStr}\t${a}\t${p}\t${cxScaled}\t${cyScaled}\n`;
-                    });
-                    fd.append("measurements", measurementsStr);
-                }
+            // Ensure the latest stabilized frame is rendered onto cameraFeedCanvas right before snapping
+            updateFrameAndHistogram();
+            updateStatus(`<span style="color:#00ffcc;">LED Stabilized at t = ${stabTimeMs} ms (Δt = 10 ms, dI/dt ≈ 0). Snapping...</span>`);
 
-                const res = await fetch('/api/save', { method: 'POST', body: fd });
-                if (!res.ok) throw new Error(await res.text());
-                
-                updateStatus(`<span style="color:#00ffcc;">Saved Image: ${fileName}</span>`);
-                if (measurementsStr) updateStatus(`<span style="color:#00ffcc;">Appended ${State.analysis.currentObjects.length} objects to measurements.txt</span>`);
-                resolve(true);
-            } catch (e) {
-                updateStatus(`<span style="color:red;">Error saving data: ${e.message}</span>`);
-                resolve(false);
+            const cameraFeedCanvas = document.getElementById('cameraFeed');
+            const canvas = document.getElementById('captureCanvas');
+            const format = document.getElementById('imgFormat').value;
+            const ext = format.split('/')[1];
+
+            canvas.width = cameraFeedCanvas.width; 
+            canvas.height = cameraFeedCanvas.height;
+            const ctx = canvas.getContext('2d');
+            
+            const edge = document.getElementById('laplaceEdgeToggle').checked;
+            const denoise = document.getElementById('laplaceDenoiseToggle').checked;
+            
+            if (edge && denoise) ctx.filter = "url(#filterBoth)";
+            else if (edge) ctx.filter = "url(#filterEdge)";
+            else if (denoise) ctx.filter = "url(#filterDenoise)";
+            
+            ctx.drawImage(cameraFeedCanvas, 0, 0, canvas.width, canvas.height);
+            ctx.filter = "none"; 
+            
+            if (State.calibration.pixelsPerUnit > 0) renderScaleBar(ctx, canvas.width, canvas.height);
+
+            // Snapshot measurements while the stabilized frame is active
+            let measurementsStr = "";
+            let objectsCount = 0;
+            const timeStr = new Date().toLocaleTimeString('en-US', { hour12: false });
+            if (State.analysis.isObjectAnalysisActive && State.analysis.currentObjects.length > 0) {
+                let scaleSq = (State.calibration.pixelsPerUnit > 0) ? (State.calibration.pixelsPerUnit * State.calibration.pixelsPerUnit) : 1;
+                let scaleLin = (State.calibration.pixelsPerUnit > 0) ? State.calibration.pixelsPerUnit : 1;
+                const fileName = `${customName}.${ext}`;
+
+                State.analysis.currentObjects.forEach(obj => {
+                    let a = (obj.area / scaleSq).toFixed(3);
+                    let p = (obj.perimeter / scaleLin).toFixed(3);
+                    let cxScaled = (obj.cx / scaleLin).toFixed(3);
+                    let cyScaled = (obj.cy / scaleLin).toFixed(3);
+                    
+                    measurementsStr += `${fileName}\t${obj.id}\t${timeStr}\t${a}\t${p}\t${cxScaled}\t${cyScaled}\n`;
+                });
+                objectsCount = State.analysis.currentObjects.length;
             }
-        }, format);
+
+            // Release stabilization lock and turn OFF illumination (000 000 000) ONLY after stabilization and frame capture
+            State.camera.isStabilizingLed = false;
+            await turnOffLight();
+            
+            canvas.toBlob(async (blob) => {
+                const fileName = `${customName}.${ext}`;
+                try {
+                    if (blob) {
+                        const objUrl = URL.createObjectURL(blob);
+                        addRecentImage({ name: fileName, url: objUrl, time: timeStr, stabTimeMs: stabTimeMs });
+                    }
+
+                    if (State.session.expFolderHandle && blob) {
+                        try {
+                            const fh = await State.session.expFolderHandle.getFileHandle(fileName, { create: true });
+                            const wr = await fh.createWritable();
+                            await wr.write(blob);
+                            await wr.close();
+                        } catch (err) {}
+                    }
+
+                    let fd = new FormData();
+                    fd.append("experiment", State.session.experiment);
+                    fd.append("filename", fileName);
+                    fd.append("image", blob, fileName);
+
+                    if (measurementsStr) {
+                        fd.append("measurements", measurementsStr);
+                    }
+
+                    const res = await fetch('/api/save', { method: 'POST', body: fd });
+                    if (!res.ok) throw new Error(await res.text());
+                    
+                    updateStatus(`<span style="color:#00ffcc;">Saved Image: ${fileName} (LED Stab: ${stabTimeMs} ms)</span>`);
+                    if (measurementsStr) updateStatus(`<span style="color:#00ffcc;">Appended ${objectsCount} objects to measurements.txt</span>`);
+                    resolve(true);
+                } catch (e) {
+                    updateStatus(`<span style="color:red;">Error saving data: ${e.message}</span>`);
+                    resolve(false);
+                }
+            }, format);
+        } catch (err) {
+            State.camera.isStabilizingLed = false;
+            updateStatus(`<span style="color:red;">Capture Error: ${err.message}</span>`);
+            resolve(false);
+        }
     });
 }

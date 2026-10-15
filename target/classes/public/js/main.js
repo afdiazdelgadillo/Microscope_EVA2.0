@@ -2,12 +2,12 @@
  * Main Application Bootstrapper
  * Serves as Phase 5 entry point, securely tying all initialized logic modules to the browser.
  */
-import { initUI } from './modules/ui.js';
+import { initUI, loadSessionSettings } from './modules/ui.js';
 import { fetchStagePorts } from './modules/hardware.js';
-import { populateCameras } from './modules/camera.js';
+import { populateCameras, renderRecentImages } from './modules/camera.js';
 import { updateStatus } from './core/utils.js';
 
-window.onload = () => { 
+window.onload = async () => { 
     try {
         // 1. Map all HTML interactions to JS Modules safely
         initUI();
@@ -30,6 +30,10 @@ window.onload = () => {
     if (zWheelEl) zWheelEl.innerText = "0.100";
     if (feedEl) feedEl.innerText = "F055";
     if (overlay) overlay.classList.add('nav-mode');
+
+    // 4. Initialize Recent Images Box and restore cached session settings
+    renderRecentImages();
+    await loadSessionSettings(null);
     
-    updateStatus("<span style='color:#ff4444; font-weight:bold;'>⚠️ ATTENTION: Limits (Gv) are initialized to 0. Please explicitly set limits before moving.</span>");
+    updateStatus("<span style='color:#ff4444; font-weight:bold;'>⚠️ ATTENTION: Verify Limits (Gv) before moving. Session settings ready.</span>");
 };

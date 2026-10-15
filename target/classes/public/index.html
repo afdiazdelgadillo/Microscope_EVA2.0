@@ -50,6 +50,7 @@
                 </div>
                 <input type="range" id="lightSlider" min="0" max="10" value="0">
                 <div id="lightValue" class="val-display">Protocol: 000 000 000</div>
+                <div id="ledStabTimeDisplay" class="val-display" style="color:#00ffcc; margin-top:2px;" title="Measured time of LED stabilization from histogram intensity derivative (Δt = 10 ms, dI/dt ≈ 0)">LED Stab Time: -- ms</div>
             </div>
 
             <div class="section">
@@ -117,7 +118,10 @@
                     <div>
                         <label>Feed Rate (mm/m)</label>
                         <input type="range" id="feedSlider" min="0" max="5" value="2">
-                        <div id="feedValue" class="val-display">F055</div>
+                        <div class="feed-rate-row">
+                            <input type="number" id="feedInput" min="1" max="1000" step="1" value="55" title="Feed Rate (Max 1000 mm/m)">
+                            <div id="feedValue" class="val-display">F055</div>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -125,12 +129,12 @@
             <div class="log" id="status">System Boot Sequence Initiated...</div>
 
             <div class="footer-tools">
-                <button id="btnSaveLog" class="btn-action btn-snap">SAVE DATA LOG</button>
+                <button id="btnSaveLog" class="btn-action btn-snap" title="Save Session Settings & Data Log">SAVE SESSION</button>
                 <button id="btnExit" class="btn-action btn-exit">EXIT</button>
             </div>
         </div>
 
-        <div class="video-panel">
+        <div class="video-panel" id="actionWindow">
             <div class="calib-bar">
                 <span style="font-size:1.12em; font-weight:bold; color:#f0f0f0;">Calibration:</span>
                 <input type="number" id="calibValue" class="calib-input" value="10" title="Length of drawn line">
@@ -171,43 +175,7 @@
                 </div>
             </div>
 
-            <div class="floating-panel" style="position: absolute; bottom: 15px; left: 15px; display: flex; flex-direction: column; gap: 10px; z-index: 50; padding: 10px 15px 15px 15px; border-radius: 8px; width: 260px;">
-                <div class="drag-handle" style="cursor: move; text-align: center; font-size: 0.8em; margin-bottom: 0px; border-bottom: 1px solid #4a3c2c; padding-bottom: 5px;">⋮⋮ DRAG ⋮⋮</div>
-                
-                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 6px;">
-                    <label style="color:#ffaa00; font-size:0.95em; font-weight:bold; cursor:pointer;" title="Stream in Full RGB Color"><input type="checkbox" id="colorStreamToggle" checked> Color Feed</label>
-                    <label style="color:#f0f0f0; font-size:0.95em; font-weight:bold; cursor:pointer;"><input type="checkbox" id="laplaceDenoiseToggle"> Denoise</label>
-                    <label style="color:#f0f0f0; font-size:0.95em; font-weight:bold; cursor:pointer;"><input type="checkbox" id="laplaceEdgeToggle"> Edge Map</label>
-                    <label style="color:#ffcc00; font-size:0.95em; font-weight:bold; cursor:pointer;" title="Complement (255 - Pixel)"><input type="checkbox" id="invertToggle"> Invert</label>
-                </div>
-                
-                <hr style="border-color:#4a3c2c; width:100%; margin:0;">
-
-                <div style="display:flex; flex-direction:column; gap:8px;">
-                    <div style="display:flex; align-items:center; justify-content:space-between;">
-                        <label style="color:#f0f0f0; font-size:0.95em; font-weight:bold; cursor:pointer; margin:0;" title="Subtract Black Noise Frame"><input type="checkbox" id="applyDarkToggle"> Sub Noise</label>
-                        <button id="btnCapDark" class="cam-btn" style="padding: 3px 8px; font-size: 0.85em; width:auto;">Cap Noise</button>
-                    </div>
-                    
-                    <div style="display:flex; align-items:center; justify-content:space-between;">
-                        <label style="color:#f0f0f0; font-size:0.95em; font-weight:bold; cursor:pointer; margin:0;" title="Flat-Field Division"><input type="checkbox" id="applyBgToggle"> Div Flat</label>
-                        <div style="display:flex; align-items:center; gap: 5px;">
-                            <label style="color:#aa8855; font-size:0.85em; margin:0; font-weight:bold;">Mult:</label>
-                            <input type="number" id="bgMultiplier" value="1.0" min="0" max="1" step="0.05" style="width: 45px; padding: 2px 4px; margin: 0; font-size: 0.85em;">
-                        </div>
-                    </div>
-
-                    <div style="display:flex; align-items:center; justify-content:space-between;">
-                        <div style="display:flex; align-items:center; gap:5px;">
-                            <label style="color:#aa8855; font-size:0.85em; margin:0; font-weight:bold;">Z-Target:</label>
-                            <input type="number" id="calibZTarget" value="-30" style="width: 50px; padding: 2px 4px; margin: 0; font-size: 0.85em;" title="Z Target for FFC Capture">
-                        </div>
-                        <button id="btnCapFlat" class="cam-btn" style="padding: 3px 8px; font-size: 0.85em; width: auto;">Cap Flat</button>
-                    </div>
-                </div>
-            </div>
-
-            <div class="floating-panel" style="position: absolute; bottom: 15px; right: 15px; display: flex; flex-direction: column; gap: 10px; z-index: 50; padding: 10px 15px 15px 15px; border-radius: 8px; align-items: center;">
+            <div class="floating-panel" style="position: absolute; bottom: 78px; right: 15px; display: flex; flex-direction: column; gap: 10px; z-index: 50; padding: 10px 15px 15px 15px; border-radius: 8px; align-items: center;">
                 <div class="drag-handle" style="cursor: move; text-align: center; font-size: 0.8em; margin-bottom: 0px; border-bottom: 1px solid #4a3c2c; padding-bottom: 5px; width: 100%;">⋮⋮ DRAG ⋮⋮</div>
                 
                 <div style="display:flex; flex-direction:column; align-items:center; gap:5px;">
@@ -218,27 +186,108 @@
                 <div style="display:flex; flex-direction:column; align-items:center; gap:5px;">
                     <label style="color:#ffaa00; font-size:0.98em; font-weight:bold; margin:0;">HISTOGRAM</label>
                     <canvas id="histogramCanvas" width="256" height="80" style="background:#050505; border:1px solid #332b22; border-radius:3px;"></canvas>
+                    <div id="intensityTelemetry" style="width:100%; font-family:Consolas, monospace; font-size:0.84em; color:#aa8855; display:flex; justify-content:space-between; padding-top:2px;">
+                        <span id="intensitySumVal">ΣI: 0</span>
+                        <span id="intensityDerivVal">dI/dt: 0/ms</span>
+                    </div>
                 </div>
+            </div>
+
+            <!-- Fixed Filter & Flat-Field Controls Bar at Lower Bound of Action Window -->
+            <div class="bottom-filter-bar" id="filterDockBar">
+                <div class="filter-group">
+                    <label class="filter-toggle" style="color:#ffaa00;" title="Stream in Full RGB Color">
+                        <input type="checkbox" id="colorStreamToggle" checked> Color Feed
+                    </label>
+                    <label class="filter-toggle" style="color:#f0f0f0;">
+                        <input type="checkbox" id="laplaceDenoiseToggle"> Denoise
+                    </label>
+                    <label class="filter-toggle" style="color:#f0f0f0;">
+                        <input type="checkbox" id="laplaceEdgeToggle"> Edge Map
+                    </label>
+                    <label class="filter-toggle" style="color:#ffcc00;" title="Complement (255 - Pixel)">
+                        <input type="checkbox" id="invertToggle"> Invert
+                    </label>
+                </div>
+
+                <div class="filter-divider"></div>
+
+                <div class="filter-group">
+                    <label class="filter-toggle" style="color:#f0f0f0;" title="Subtract Black Noise Frame">
+                        <input type="checkbox" id="applyDarkToggle"> Sub Noise
+                    </label>
+                    <button id="btnCapDark" class="cam-btn filter-mini-btn">Cap Noise</button>
+                </div>
+
+                <div class="filter-divider"></div>
+
+                <div class="filter-group">
+                    <label class="filter-toggle" style="color:#f0f0f0;" title="Flat-Field Division">
+                        <input type="checkbox" id="applyBgToggle"> Div Flat
+                    </label>
+                    <div class="filter-param">
+                        <label for="bgMultiplier">Mult:</label>
+                        <input type="number" id="bgMultiplier" value="1.0" min="0" max="1" step="0.05">
+                    </div>
+                    <div class="filter-param">
+                        <label for="calibZTarget">Z-Target:</label>
+                        <input type="number" id="calibZTarget" value="-30" title="Z Target for FFC Capture">
+                    </div>
+                    <button id="btnCapFlat" class="cam-btn filter-mini-btn">Cap Flat</button>
+                </div>
+            </div>
+
+            <!-- In-App Magnified Recent Images Viewer Overlay -->
+            <div id="recentImagesModal" class="recent-modal" style="display: none;">
+                <div class="recent-modal-header">
+                    <div class="recent-modal-title-wrap">
+                        <span class="recent-modal-badge">RECENT CAPTURE</span>
+                        <span id="recentModalTitle" class="recent-modal-title">No Image Selected</span>
+                        <span id="recentModalCounter" class="recent-modal-counter">0 / 0</span>
+                    </div>
+                    <button id="btnCloseRecentModal" class="btn-action btn-exit recent-modal-close" title="Return to live view">✕ MINIMIZE</button>
+                </div>
+                <div class="recent-modal-stage">
+                    <button id="btnRecentPrev" class="recent-nav-btn" title="Previous Image">◀</button>
+                    <div class="recent-modal-img-wrap">
+                        <img id="recentModalImg" src="" alt="Recent Captured Image">
+                        <div id="recentModalCaption" class="recent-modal-caption"></div>
+                    </div>
+                    <button id="btnRecentNext" class="recent-nav-btn" title="Next Image">▶</button>
+                </div>
+                <div id="recentModalStrip" class="recent-modal-strip"></div>
             </div>
             
         </div>
 
         <div class="waypoint-panel">
+            <div class="recent-images-box" id="recentImagesSection">
+                <div class="recent-header">
+                    <h2>RECENT IMAGES</h2>
+                    <button id="btnMagnifyRecent" class="conn-btn recent-magnify-btn" title="Magnify Recent Images within App Area">⛶ MAGNIFY</button>
+                </div>
+                <div id="recentImagesList" class="recent-images-list">
+                    <div class="recent-empty">No images captured yet</div>
+                </div>
+            </div>
+
+            <hr style="border-color: #332b22; width: 100%; margin: 4px 0;">
+
             <h2>WAYPOINTS</h2>
             <button id="btnSaveWaypoint" class="cam-btn" style="width: 100%; border-radius: 4px; margin-bottom: 5px;">+ SAVE CURRENT POS</button>
             
-            <select id="waypointList" size="12" style="flex: 1; width: 100%; background: #050505; color: #ffaa00; border: 1px solid #4a3c2c; font-family: Consolas, monospace; font-size: 1.19em; padding: 5px; outline: none;"></select>
+            <select id="waypointList" size="8" style="flex: 1; min-height: 110px; width: 100%; background: #050505; color: #ffaa00; border: 1px solid #4a3c2c; font-family: Consolas, monospace; font-size: 1.12em; padding: 5px; outline: none;"></select>
             
             <div style="display: flex; gap: 8px; margin-top: 5px;">
                 <button id="btnGoWaypoint" class="btn-action btn-snap" style="flex: 2; padding: 8px;">🚀 GO TO POS</button>
                 <button id="btnDelWaypoint" class="btn-action btn-exit" style="flex: 1; padding: 8px;">DEL</button>
             </div>
 
-            <hr style="border-color: #332b22; width: 100%; margin: 10px 0;">
+            <hr style="border-color: #332b22; width: 100%; margin: 8px 0;">
             <h2 style="font-size: 1.1em; border:none; margin:0; padding:0;">OBJECT ANALYSIS</h2>
             <button id="btnToggleAnalysis" class="cam-btn" style="width: 100%; background: #ffaa00; color: black; margin-bottom: 5px;">Start Real-Time Tracking</button>
 
-            <hr style="border-color: #332b22; width: 100%; margin: 10px 0;">
+            <hr style="border-color: #332b22; width: 100%; margin: 8px 0;">
             <h2 style="font-size: 1.1em; border:none; margin:0; padding:0;">MACRO LOOP</h2>
             
             <div style="display: flex; gap: 5px; margin-top: 5px;">

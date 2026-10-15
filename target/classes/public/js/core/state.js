@@ -22,7 +22,8 @@ export const State = {
         // Hardware Constants
         scales: [10.0, 1.0, 0.1, 0.01, 0.001, 0.0001],
         zWheelSteps: [0.10, 0.08, 0.06, 0.04, 0.02, 0.01, 0.005],
-        feedRates: [25, 40, 55, 70, 85, 100]
+        feedRates: [25, 40, 55, 70, 85, 100],
+        currentFeedRate: 55
     },
 
     // 3. Hall Effect Sensor Telemetry
@@ -37,7 +38,9 @@ export const State = {
         illuminationPort: null,
         serialReader: null,
         isLightConnected: false,
-        isStageConnected: false
+        isStageConnected: false,
+        lightIntensity: 10,
+        currentLightProtocol: '000'
     },
 
     // 5. Waypoints & Macro Automation
@@ -63,7 +66,27 @@ export const State = {
         captureNextFrameAsDark: false,
         captureNextFrameAsBackground: false,
         darkFrameRGB: null,
-        backgroundFrameRGB: null
+        backgroundFrameRGB: null,
+        recentImages: [],
+        selectedRecentIndex: -1,
+        isRecentModalOpen: false,
+        currentHistogram: null,
+        lastHistogramUpdateMs: null,
+        derivativeIntervalId: null,
+        frameCount: 0,
+        pixelCount: 0,
+        frameIntensitySum: 0,
+        frameMeanIntensity: 0,
+        prevFrameIntensitySum: null,
+        prevFrameMeanIntensity: null,
+        frameTimestamp: null,
+        intensityDerivative: 0,
+        meanIntensityDerivative: 0,
+        isStabilizingLed: false,
+        isLedStabilized: false,
+        ledStabilizationTimeMs: null,
+        ledStabilizationHistory: [],
+        onFrameIntensitySample: null
     },
 
     // 8. Machine Vision & Object Analysis

@@ -1,6 +1,6 @@
 import { State } from '../core/state.js';
 import { sleep, updateStatus } from '../core/utils.js';
-import { sendStageCommand, updateCoordsDisplay, getFeedRateStr, getFeedRateNum } from './hardware.js';
+import { sendStageCommand, updateCoordsDisplay, getFeedRateStr, getFeedRateNum, turnOffLight } from './hardware.js';
 import { captureImage } from './camera.js';
 
 export function saveWaypoint() {
@@ -15,11 +15,12 @@ export function saveWaypoint() {
 
 export function renderWaypoints() {
     const list = document.getElementById('waypointList');
+    if (!list) return;
     list.innerHTML = "";
     State.automation.waypoints.forEach((wp, index) => {
         let opt = document.createElement('option');
         opt.value = index;
-        opt.innerHTML = `${wp.name} [${wp.x.toFixed(2)}, ${wp.y.toFixed(2)}, ${wp.z.toFixed(2)}]`;
+        opt.innerHTML = `${wp.name} [${Number(wp.x).toFixed(2)}, ${Number(wp.y).toFixed(2)}, ${Number(wp.z).toFixed(2)}]`;
         list.appendChild(opt);
     });
     list.scrollTop = list.scrollHeight;
@@ -66,6 +67,7 @@ export function parseTimeStr(str) {
 export async function toggleSequence() {
     if (State.automation.sequenceActive) {
         State.automation.sequenceActive = false;
+        await turnOffLight();
         document.getElementById('btnSequence').innerText = "▶ RUN SEQUENCE";
         document.getElementById('btnSequence').style.background = "#ffaa00";
         updateStatus("<span style='color:orange; font-weight:bold;'>Sequence Aborted by User.</span>");
@@ -84,6 +86,7 @@ export async function toggleSequence() {
     btn.innerText = "⏹ STOP SEQUENCE";
     btn.style.background = "#ff4444";
 
+    await turnOffLight();
     updateStatus(`<span style="color:#00ffcc; font-weight:bold;">SEQUENCE STARTED: ${cycles} Cycles</span>`);
 
     for (let c = 1; c <= cycles; c++) {
@@ -121,6 +124,7 @@ export async function toggleSequence() {
             let safeName = wp.name.replace(/[^a-zA-Z0-9_-]/g, "_"); 
             let fileName = `${timeStamp}_X${wp.x.toFixed(2)}_Y${wp.y.toFixed(2)}_Z${wp.z.toFixed(2)}_${safeName}_Cycle${c}`;
             
+            // captureImage turns ON light, tracks ΣI(t) & dI/dt until LED stabilizes (plateau at t > t+1 without overshoot), stores stabilization time, shoots, and turns OFF light (000 000 000)
             await captureImage(fileName);
             await sleep(500); 
         }
@@ -132,6 +136,8 @@ export async function toggleSequence() {
             await sleep(intervalMs);
         }
     }
+
+    await turnOffLight();
 
     if (State.automation.sequenceActive) {
         updateStatus("<span style='color:#00ff00; font-weight:bold;'>✅ Macro Sequence Complete!</span>");
